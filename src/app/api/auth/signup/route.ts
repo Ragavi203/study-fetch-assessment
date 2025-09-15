@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import bcrypt from 'bcrypt';
 
+// Set Node.js runtime to make bcrypt work in Vercel
+export const runtime = 'nodejs';
+
 export async function POST(request: Request) {
   const { email, password } = await request.json();
   if (!email || !password) {
@@ -17,6 +20,3 @@ export async function POST(request: Request) {
   });
   return NextResponse.json({ message: 'Signup successful', user: { id: user.id, email: user.email } });
 }
-
-// rm -rf .next node_modules
-

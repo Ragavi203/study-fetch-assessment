@@ -3,6 +3,9 @@ import prisma from '@/lib/prisma';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 
+// Set Node.js runtime to make bcrypt work in Vercel
+export const runtime = 'nodejs';
+
 export async function POST(req: NextRequest) {
     try {
         const { email, password } = await req.json();
