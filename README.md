@@ -5,11 +5,11 @@ StudyFetch AI Tutor is an interactive learning platform that helps students unde
 
 ## Deliverables Checklist
 
-✅ Complete source code in this GitHub repository
-✅ Setup instructions (below and in GITHUB-SETUP.md)
-✅ .env.example file with required environment variables
-✅ Basic documentation (this README and additional .md files)
-✅ Deployed public demo on Vercel (see link in Deployment section)
+ Complete source code in this GitHub repository
+ Setup instructions (below and in GITHUB-SETUP.md)
+ .env.example file with required environment variables
+ Basic documentation (this README and additional .md files)
+ Deployed public demo on Vercel (see link in Deployment section)
 
 ## Features
 
