@@ -1,103 +1,112 @@
-import Image from "next/image";
+
+"use client";
+import { useState, useEffect } from "react";
+import LoginPage from "./login/page";
+import SignupPage from "./signup/page";
+import PDFPage from "./pdf/page";
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
+  // Check for existing authentication on component mount
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      // Verify the token with the backend
+      fetch('/api/auth/verify', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      .then(res => {
+        if (res.ok) {
+          setIsAuthenticated(true);
+          window.location.href = '/dashboard'; // Redirect to dashboard on successful auth check
+        } else {
+          // If token is invalid, remove it
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+          setIsAuthenticated(false);
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        setIsAuthenticated(false);
+      });
+    }
+  }, []);
+
+  const handleAuthSuccess = () => {
+    setIsAuthenticated(true);
+    window.location.href = '/dashboard'; // Redirect to dashboard after login
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setIsAuthenticated(false);
+    window.location.href = '/'; // Redirect to home on logout
+  };
+
+  // If already authenticated, redirect to dashboard
+  useEffect(() => {
+    if (isAuthenticated) {
+      window.location.href = '/dashboard';
+    }
+  }, [isAuthenticated]);
+
+  return (
+    <div className="min-h-screen bg-[#2D2654] flex flex-col">
+      <nav className="flex justify-between items-center px-8 py-6 bg-[#352D63] shadow-lg">
+        <div className="font-extrabold text-2xl tracking-wide text-white">Study Fetch Assessment</div>
+        {!isAuthenticated && (
+          <div>
+            <button
+              className={`mr-2 px-6 py-2 rounded-xl font-semibold transition-colors duration-200 ${
+                authMode === 'login' 
+                  ? 'bg-[#6A5DB9] text-white shadow-lg hover:bg-[#7A6DC9]' 
+                  : 'bg-[#453A7C] text-white hover:bg-[#554A8C]'
+              }`}
+              onClick={() => setAuthMode('login')}
+            >Login</button>
+            <button
+              className={`px-6 py-2 rounded-xl font-semibold transition-colors duration-200 ${
+                authMode === 'signup' 
+                  ? 'bg-[#6A5DB9] text-white shadow-lg hover:bg-[#7A6DC9]' 
+                  : 'bg-[#453A7C] text-white hover:bg-[#554A8C]'
+              }`}
+              onClick={() => setAuthMode('signup')}
+            >Sign Up</button>
+          </div>
+        )}
+        {isAuthenticated && (
+          <button
+            className="px-6 py-2 rounded-xl bg-[#453A7C] text-white font-semibold shadow-lg hover:bg-[#554A8C] transition-colors duration-200"
+            onClick={handleLogout}
+          >Logout</button>
+        )}
+      </nav>
+      <main className="flex-1 flex items-center justify-center px-4">
+        {!isAuthenticated ? (
+          <div className="w-full max-w-md mx-auto bg-[#352D63] rounded-2xl shadow-2xl p-10 mt-8 flex flex-col items-center">
+            <div className="mb-8 text-center">
+              <h2 className="text-3xl font-bold text-white mb-4">{authMode === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
+              <p className="text-white/70 text-base">{authMode === 'login' ? 'Sign in to access your study workspace' : 'Join Study Fetch Assessment to start learning'}</p>
+            </div>
+            {authMode === 'login' ? (
+              <LoginPage />
+            ) : (
+              <SignupPage />
+            )}
+          </div>
+        ) : (
+          <div className="w-full max-w-6xl mx-auto bg-white rounded-2xl shadow-xl p-8 mt-8">
+            <PDFPage />
+          </div>
+        )}
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
     </div>
   );
 }

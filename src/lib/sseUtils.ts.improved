@@ -1,0 +1,285 @@
+import { NextResponse } from 'next/server';
+
+/**
+ * Enhanced Server-Sent Events (SSE) utilities
+ * Supports reconnection, heartbeats, backpressure handling, and structured event types
+ */
+
+/**
+ * Create a Server-Sent Events (SSE) response with proper headers
+ * @param options Additional configuration options
+ * @returns NextResponse configured for SSE
+ */
+export function createSSEResponse(options?: {
+  retryInterval?: number;  // Milliseconds to wait before reconnect (client-side)
+  cors?: boolean;          // Whether to add CORS headers
+}) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // Disable nginx buffering
+  };
+
+  // Add CORS headers if requested
+  if (options?.cors) {
+    headers['Access-Control-Allow-Origin'] = '*';
+    headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization';
+  }
+
+  // Create stream with TransformStream for better backpressure handling
+  const stream = new TransformStream();
+  const response = new NextResponse(stream.readable, { headers });
+  
+  // If retry interval specified, send it immediately
+  if (options?.retryInterval) {
+    const encoder = new TextEncoder();
+    const writer = stream.writable.getWriter();
+    writer.write(encoder.encode(`retry: ${options.retryInterval}\n\n`));
+    writer.releaseLock();
+  }
+  
+  return response;
+}
+
+/**
+ * Format a message for SSE with improved structure
+ * @param data The data to send
+ * @param event The event type
+ * @param id Optional event ID for reconnection
+ * @returns Formatted SSE message string
+ */
+export function formatSSEMessage(
+  data: any, 
+  event: string = 'message', 
+  id?: string | number
+) {
+  let message = '';
+  
+  // Add ID if provided (helps with reconnection)
+  if (id !== undefined) {
+    message += `id: ${id}\n`;
+  }
+  
+  // Add event type and data
+  message += `event: ${event}\n`;
+  message += `data: ${JSON.stringify(data)}\n\n`;
+  
+  return message;
+}
+
+/**
+ * Send a message through an SSE writer
+ * @param writer The writer from the transform stream
+ * @param data The data to send
+ * @param event The event type
+ * @param id Optional event ID for reconnection
+ */
+export async function sendSSEMessage(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  data: any,
+  event: string = 'message',
+  id?: string | number
+) {
+  try {
+    const encoder = new TextEncoder();
+    const message = formatSSEMessage(data, event, id);
+    await writer.write(encoder.encode(message));
+  } catch (error) {
+    console.error(`Error sending SSE message (${event}):`, error);
+    throw error;
+  }
+}
+
+/**
+ * Handle errors safely in Edge runtime
+ * @param error The error object
+ * @returns A safe string representation of the error
+ */
+export function handleEdgeError(error: unknown): string {
+  try {
+    // For standard errors, extract name and message
+    if (error instanceof Error) {
+      return `${error.name}: ${error.message}`;
+    }
+    
+    // For other error types, convert to string
+    return String(error);
+  } catch (e) {
+    // Last resort if error serialization fails
+    return "Unknown error occurred";
+  }
+}
+
+/**
+ * Send a heartbeat message to keep the SSE connection alive
+ * @param writer The writer from the transform stream
+ */
+export async function sendHeartbeat(writer: WritableStreamDefaultWriter<Uint8Array>) {
+  try {
+    const encoder = new TextEncoder();
+    // Send a comment line (starts with :) which is ignored by clients but keeps the connection alive
+    await writer.write(encoder.encode(': heartbeat\n\n'));
+  } catch (error) {
+    console.error('Error sending heartbeat:', error);
+  }
+}
+
+/**
+ * Create an interval for sending heartbeats
+ * @param writer The writer from the transform stream
+ * @param intervalMs The interval in milliseconds (default: 15 seconds)
+ * @returns A NodeJS.Timeout that can be cleared
+ */
+export function createHeartbeatInterval(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  intervalMs: number = 15000
+): NodeJS.Timeout {
+  return setInterval(() => {
+    sendHeartbeat(writer).catch((error) => {
+      console.error('Failed to send heartbeat, closing interval:', error);
+      clearInterval(interval);
+    });
+    
+    const interval = setInterval(async () => {
+      await sendHeartbeat(writer);
+    }, intervalMs);
+    
+    return interval;
+  }, intervalMs);
+}
+
+/**
+ * Create a timeout to automatically close idle connections
+ * @param writer The writer from the transform stream
+ * @param timeoutMs The timeout in milliseconds (default: 60 seconds)
+ * @returns A NodeJS.Timeout that can be cleared
+ */
+export function createConnectionTimeout(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  timeoutMs: number = 60000
+): NodeJS.Timeout {
+  const timeout = setTimeout(async () => {
+    try {
+      // Send a final message
+      await sendSSEMessage(writer, { message: 'Connection timed out due to inactivity' }, 'error');
+      
+      // Close the stream
+      await writer.close();
+      console.log('Closed SSE connection due to timeout');
+    } catch (error) {
+      console.error('Error closing timed out SSE connection:', error);
+    }
+  }, timeoutMs);
+  
+  return timeout;
+}
+
+/**
+ * SSE event types for structured client-server communication
+ */
+export const SSEEventTypes = {
+  INIT: 'init',            // Initial connection setup
+  TOKEN: 'token',          // LLM text token
+  ANNOTATION: 'annotation', // PDF annotation commands
+  NAVIGATION: 'navigation', // Page navigation commands
+  STATUS: 'status',        // Status updates (processing, waiting, etc)
+  ERROR: 'error',          // Error messages
+  DONE: 'done',            // Completion signal
+  HEARTBEAT: 'heartbeat',  // Connection keepalive
+};
+
+/**
+ * Client helper for reconnecting and processing SSE events
+ * (To be used in client-side code)
+ */
+export const createSSEClient = (url: string, options?: {
+  onInit?: (data: any) => void;
+  onToken?: (token: string) => void;
+  onAnnotation?: (annotation: any) => void;
+  onNavigation?: (data: any) => void;
+  onStatus?: (status: string) => void;
+  onError?: (error: any) => void;
+  onDone?: () => void;
+  onHeartbeat?: () => void;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+  maxRetries?: number;
+}) => {
+  if (typeof window === 'undefined') return { close: () => {} }; // SSR guard
+  
+  let eventSource: EventSource | null = null;
+  let retries = 0;
+  const maxRetries = options?.maxRetries ?? 3;
+  
+  const connect = () => {
+    if (eventSource) {
+      eventSource.close();
+    }
+    
+    eventSource = new EventSource(url);
+    
+    // Connection established
+    eventSource.onopen = () => {
+      retries = 0;
+      options?.onConnect?.();
+    };
+    
+    // Handle different event types
+    eventSource.addEventListener(SSEEventTypes.INIT, (event) => {
+      options?.onInit?.(JSON.parse(event.data));
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.TOKEN, (event) => {
+      options?.onToken?.(JSON.parse(event.data));
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.ANNOTATION, (event) => {
+      options?.onAnnotation?.(JSON.parse(event.data));
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.NAVIGATION, (event) => {
+      options?.onNavigation?.(JSON.parse(event.data));
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.STATUS, (event) => {
+      options?.onStatus?.(JSON.parse(event.data));
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.ERROR, (event) => {
+      options?.onError?.(JSON.parse(event.data));
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.DONE, () => {
+      options?.onDone?.();
+      eventSource?.close();
+    });
+    
+    eventSource.addEventListener(SSEEventTypes.HEARTBEAT, () => {
+      options?.onHeartbeat?.();
+    });
+    
+    // Error handling and reconnection logic
+    eventSource.onerror = (error) => {
+      if (eventSource?.readyState === EventSource.CLOSED) {
+        if (retries < maxRetries) {
+          retries++;
+          setTimeout(connect, 1000 * retries); // Exponential backoff
+        } else {
+          options?.onError?.({ message: 'Connection failed after multiple retries' });
+          options?.onDisconnect?.();
+        }
+      }
+    };
+  };
+  
+  connect();
+  
+  return {
+    close: () => {
+      eventSource?.close();
+      options?.onDisconnect?.();
+    }
+  };
+};

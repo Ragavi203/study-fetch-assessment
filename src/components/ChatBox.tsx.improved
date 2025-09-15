@@ -1,0 +1,464 @@
+"use client";
+import React, { useState, useEffect } from 'react';
+import { Annotation } from '@/types/types';
+import * as pdfjsLib from 'pdfjs-dist';
+
+interface ChatBoxProps {
+  pdfUrl: string;
+  pdfId?: string;
+  onAnnotation: (annotations: Annotation[]) => void;
+  token: string | null;
+  onPageChange: (pageNum: number) => void;
+  currentPage: number;
+  totalPages: number;
+  pdfDimensions?: { width: number; height: number };
+}
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: Date;
+  annotations?: Annotation[];
+}
+
+interface TextItem {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export default function ChatBox({
+  pdfUrl,
+  pdfId,
+  onAnnotation,
+  token,
+  onPageChange,
+  currentPage,
+  totalPages,
+  pdfDimensions,
+}: ChatBoxProps): JSX.Element {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [pdfTextLayouts, setPdfTextLayouts] = useState<Map<number, TextItem[]>>(new Map());
+
+  // Load chat history
+  useEffect(() => {
+    if (pdfId && token) {
+      fetch(`/api/chat/history/${pdfId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.messages) {
+          setMessages(data.messages);
+          
+          // Apply annotations from history if they exist
+          const latestMessage = data.messages[data.messages.length - 1];
+          if (latestMessage?.annotations && latestMessage.annotations.length > 0) {
+            onAnnotation(latestMessage.annotations);
+          }
+        }
+      })
+      .catch(console.error);
+    }
+  }, [pdfId, token, onAnnotation]);
+
+  // Preload PDF text and layout for a few pages
+  useEffect(() => {
+    if (!pdfUrl) return;
+
+    const preloadPages = async () => {
+      // Preload current page and adjacent pages
+      const pagesToLoad = [
+        currentPage,
+        currentPage > 1 ? currentPage - 1 : null,
+        currentPage < totalPages ? currentPage + 1 : null
+      ].filter(Boolean) as number[];
+
+      // Only load pages we don't already have
+      const pagesToFetch = pagesToLoad.filter(page => !pdfTextLayouts.has(page));
+      
+      if (pagesToFetch.length === 0) return;
+      
+      try {
+        const layoutsPromises = pagesToFetch.map(page => extractPageTextWithLayout(page));
+        const layouts = await Promise.all(layoutsPromises);
+        
+        // Update the state with new layouts
+        const updatedLayouts = new Map(pdfTextLayouts);
+        pagesToFetch.forEach((page, index) => {
+          updatedLayouts.set(page, layouts[index]);
+        });
+        
+        setPdfTextLayouts(updatedLayouts);
+      } catch (error) {
+        console.error('Error preloading PDF pages:', error);
+      }
+    };
+
+    preloadPages();
+  }, [pdfUrl, currentPage, pdfTextLayouts, totalPages]);
+
+  // Voice recognition setup
+  useEffect(() => {
+    let recognition: any = null;
+    
+    if ('webkitSpeechRecognition' in window) {
+      recognition = new (window as any).webkitSpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      
+      recognition.onstart = () => {
+        console.log('Speech recognition started');
+        setIsListening(true);
+      };
+      
+      recognition.onresult = (event: any) => {
+        const transcript = Array.from(event.results)
+          .map((result: any) => result[0])
+          .map(result => result.transcript)
+          .join('');
+        
+        setInput(transcript);
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+      
+      recognition.onend = () => {
+        console.log('Speech recognition ended');
+        setIsListening(false);
+      };
+    }
+
+    return () => {
+      if (recognition) {
+        recognition.stop();
+      }
+    };
+  }, []);
+
+  const toggleVoiceRecognition = () => {
+    if ('webkitSpeechRecognition' in window) {
+      const recognition = new (window as any).webkitSpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      
+      recognition.onresult = (event: any) => {
+        const transcript = Array.from(event.results)
+          .map((result: any) => result[0])
+          .map(result => result.transcript)
+          .join('');
+        setInput(transcript);
+      };
+      
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+      
+      if (!isListening) {
+        try {
+          recognition.start();
+          setIsListening(true);
+        } catch (error) {
+          console.error('Speech recognition error:', error);
+          alert('Failed to start voice recognition. Please try again.');
+        }
+      } else {
+        recognition.stop();
+        setIsListening(false);
+      }
+    } else {
+      alert('Voice recognition is not supported in your browser');
+    }
+  };
+
+  // Enhanced text extraction that includes layout information
+  const extractPageTextWithLayout = async (pageNum: number): Promise<TextItem[]> => {
+    if (!pdfUrl) return [];
+    try {
+      const loadingTask = pdfjsLib.getDocument(pdfUrl);
+      const pdf = await loadingTask.promise;
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const viewport = page.getViewport({ scale: 1.0 });
+      
+      // Extract text items with position data
+      const textItems: TextItem[] = [];
+      
+      for (const item of textContent.items) {
+        if ('str' in item && item.str.trim()) {
+          // Get text position and size
+          const transform = item.transform;
+          const x = Math.round(transform[4]);
+          const y = Math.round(viewport.height - transform[5]); // PDF coordinates start from bottom-left
+          
+          // Estimate text dimensions based on font size and string length
+          const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
+          const width = item.str.length * fontSize * 0.6; // Approximate width based on char count
+          const height = fontSize * 1.2; // Approximate height
+          
+          textItems.push({
+            text: item.str,
+            x,
+            y,
+            width: Math.round(width),
+            height: Math.round(height)
+          });
+        }
+      }
+      
+      return textItems;
+    } catch (error) {
+      console.error('Error extracting text with layout:', error);
+      return [];
+    }
+  };
+
+  // Convert text items to plain text
+  const textItemsToString = (items: TextItem[]): string => {
+    if (!items || items.length === 0) return '';
+    
+    // Sort text items by position (top to bottom, left to right)
+    const sortedItems = [...items].sort((a, b) => {
+      // Group items into lines (items with similar y values)
+      const yDiff = a.y - b.y;
+      if (Math.abs(yDiff) < 10) {
+        return a.x - b.x; // Same line, sort by x
+      }
+      return yDiff; // Different lines, sort by y
+    });
+    
+    return sortedItems
+      .map(item => item.text)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const handleSend = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!input.trim() || !token || !pdfUrl) return;
+    
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: input,
+      timestamp: new Date()
+    };
+    
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
+    setLoading(true);
+    
+    try {
+      if (!pdfUrl) {
+        throw new Error('PDF URL is not available');
+      }
+
+      // Get current page layout
+      let currentPageLayout = pdfTextLayouts.get(currentPage) || [];
+      if (!currentPageLayout.length) {
+        // If layout is not preloaded, fetch it now
+        currentPageLayout = await extractPageTextWithLayout(currentPage);
+        setPdfTextLayouts(prev => new Map(prev).set(currentPage, currentPageLayout));
+      }
+
+      // Get adjacent pages text
+      let previousPageText = '';
+      let nextPageText = '';
+      
+      if (currentPage > 1) {
+        let previousLayout = pdfTextLayouts.get(currentPage - 1);
+        if (!previousLayout) {
+          previousLayout = await extractPageTextWithLayout(currentPage - 1);
+          setPdfTextLayouts(prev => new Map(prev).set(currentPage - 1, previousLayout));
+        }
+        previousPageText = textItemsToString(previousLayout);
+      }
+      
+      if (currentPage < totalPages) {
+        let nextLayout = pdfTextLayouts.get(currentPage + 1);
+        if (!nextLayout) {
+          nextLayout = await extractPageTextWithLayout(currentPage + 1);
+          setPdfTextLayouts(prev => new Map(prev).set(currentPage + 1, nextLayout));
+        }
+        nextPageText = textItemsToString(nextLayout);
+      }
+
+      const currentPageText = textItemsToString(currentPageLayout);
+
+      // Prepare PDF text with layout information
+      const pdfText = {
+        current: currentPageText,
+        previous: previousPageText || null,
+        next: nextPageText || null,
+        currentPage,
+        totalPages,
+        currentPageLayout
+      };
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          messages: newMessages,
+          pdfText,
+          pdfId,
+          currentPage
+        }),
+      });
+      
+      if (res.status === 401) {
+        localStorage.removeItem('token');
+        window.location.href = '/';
+        return;
+      }
+      
+      const data = await res.json();
+      if (res.ok) {
+        const assistantMessage: ChatMessage = {
+          role: "assistant",
+          content: data.reply,
+          timestamp: new Date(),
+          annotations: data.annotations
+        };
+
+        setMessages([...newMessages, assistantMessage]);
+        
+        if (data.annotations && data.annotations.length > 0) {
+          onAnnotation(data.annotations);
+        }
+        
+        if (data.pageNumber) {
+          onPageChange(data.pageNumber);
+        }
+
+        // Text-to-speech for reading responses
+        if (input.toLowerCase().includes('read this') || 
+            input.toLowerCase().includes('read it') ||
+            input.toLowerCase().includes('read that') ||
+            input.toLowerCase().includes('speak') ||
+            input.toLowerCase().includes('tell me')) {
+          if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            
+            const speech = new SpeechSynthesisUtterance(data.reply);
+            speech.rate = 1.0;
+            speech.pitch = 1.0;
+            speech.volume = 1.0;
+            
+            speech.onend = () => {
+              console.log('Speech finished');
+            };
+            
+            speech.onerror = (event) => {
+              console.error('Speech error:', event);
+            };
+            
+            window.speechSynthesis.speak(speech);
+          } else {
+            console.warn('Text-to-speech not supported in this browser');
+          }
+        }
+      } else {
+        alert(data.error || 'Failed to send message');
+      }
+    } catch (error: any) {
+      console.error('Chat error:', error);
+      const errorMessage = error?.message || 'An unexpected error occurred';
+      alert(`Error: ${errorMessage}. Please try again.`);
+      
+      if (error?.response) {
+        const responseData = await error.response.json();
+        console.error('Server response:', responseData);
+      }
+    } finally {
+      setInput("");
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="w-full h-[80vh] flex flex-col bg-[#352D63] rounded-xl shadow-xl p-6">
+      <div className="flex-1 overflow-y-auto mb-4 px-4 custom-scrollbar">
+        {messages.map((msg, idx) => (
+          <div 
+            key={idx} 
+            className={`mb-4 ${msg.role === "user" ? "ml-auto" : "mr-auto"} max-w-[80%]`}
+          >
+            <div className={`rounded-xl p-4 ${
+              msg.role === "user" 
+                ? "bg-[#6A5DB9] text-white ml-auto" 
+                : "bg-[#453A7C] text-white"
+            }`}>
+              <div className="font-semibold mb-2 text-white/90">
+                {msg.role === "user" ? "You" : "AI Study Assistant"}
+              </div>
+              <div className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+              {msg.timestamp && (
+                <div className="text-xs mt-2 text-white/70">
+                  {new Date(msg.timestamp).toLocaleTimeString()}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      <form onSubmit={handleSend} className="flex items-center gap-3 p-4 bg-[#453A7C] rounded-xl">
+        <input
+          type="text"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          className="flex-1 bg-[#2D2654] text-white placeholder-white/50 rounded-xl px-6 py-4 focus:outline-none focus:ring-2 focus:ring-[#6A5DB9] text-lg"
+          placeholder="Ask any question about your PDF..."
+          disabled={loading}
+        />
+        <button
+          type="button"
+          onClick={toggleVoiceRecognition}
+          className={`p-3 rounded-xl transition-all duration-200 ${
+            isListening 
+              ? 'bg-[#6A5DB9] text-white' 
+              : 'bg-[#2D2654] text-white/70 hover:text-white'
+          }`}
+          title={isListening ? 'Stop recording' : 'Start voice input'}
+        >
+          <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
+              d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+            />
+          </svg>
+        </button>
+        <button
+          type="submit"
+          className={`px-8 py-4 rounded-xl font-semibold text-lg transition-all duration-200 ${
+            loading
+              ? 'bg-[#2D2654] text-white/50'
+              : 'bg-[#6A5DB9] text-white hover:bg-[#7A6DC9]'
+          }`}
+          disabled={loading}
+        >
+          {loading ? (
+            <div className="flex items-center justify-center gap-3">
+              <div className="w-5 h-5 border-3 border-white/30 border-t-white rounded-full animate-spin"></div>
+              {isListening ? 'Processing voice...' : 'Reading PDF...'}
+            </div>
+          ) : (
+            'Send Question'
+          )}
+        </button>
+      </form>
+    </div>
+  );
+}

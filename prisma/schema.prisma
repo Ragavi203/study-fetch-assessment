@@ -1,0 +1,132 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String        @id @default(uuid())
+  email       String        @unique
+  password    String
+  chats       Chat[]
+  pdfs        PDF[]
+  annotations Annotation[]  // Added relation to annotations
+  messages    ChatMessage[] // Added relation to messages
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @default(now())
+  deletedAt   DateTime?
+
+  @@index([email])
+}
+
+model PDF {
+  id          String        @id @default(uuid())
+  url         String
+  title       String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  chats       Chat[]
+  pages       PDFPage[]     // Added relation to PDFPage
+  annotations Annotation[]  // Added relation to annotations
+  messages    ChatMessage[] // Added relation to messages
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+  pageCount   Int           @default(0)
+
+  @@index([userId])
+}
+
+model Chat {
+  id        String        @id @default(uuid())
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  pdf       PDF           @relation(fields: [pdfId], references: [id], onDelete: Cascade)
+  pdfId     String
+  messages  Json          // Keeping for backward compatibility
+  chatMessages ChatMessage[] // Added relation to ChatMessage
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  deletedAt DateTime?
+
+  @@index([userId])
+  @@index([pdfId])
+}
+
+model ChatMessage {
+  id          String       @id @default(uuid())
+  chat        Chat?        @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  chatId      String?
+  pdf         PDF?         @relation(fields: [pdfId], references: [id], onDelete: Cascade)
+  pdfId       String?
+  user        User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String?
+  role        String       // 'user' | 'assistant' | 'system'
+  content     String       @db.Text
+  annotations Annotation[]
+  pageContext Int?         // Current page when message was created
+  sessionId   String?      // For grouping messages in a session
+  createdAt   DateTime     @default(now())
+  tokenCount  Int?
+  error       Boolean      @default(false)
+  meta        Json?        // For model info, token usage, etc.
+  voiceInput  Boolean      @default(false)
+  
+  @@index([chatId, createdAt])
+  @@index([pdfId, userId])
+  @@index([sessionId])
+}
+
+model Annotation {
+  id            String       @id @default(uuid())
+  chatMessage   ChatMessage? @relation(fields: [chatMessageId], references: [id], onDelete: SetNull)
+  chatMessageId String?
+  pdf           PDF          @relation(fields: [pdfId], references: [id], onDelete: Cascade)
+  pdfId         String
+  user          User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId        String?
+  page          Int
+  type          String       // 'highlight' | 'circle' | 'underline' | 'arrow' | 'text' | 'rectangle' | 'freeform'
+  x             Int
+  y             Int
+  width         Int?
+  height        Int?
+  radius        Int?
+  color         String?
+  text          String?      @db.Text
+  importance    String?      // 'low' | 'medium' | 'high'
+  sequence      Int          @default(0) // ordering within message
+  isAutomatic   Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  deletedAt     DateTime?
+  meta          Json?
+
+  @@index([pdfId, page])
+  @@index([chatMessageId])
+  @@index([userId])
+}
+
+model PDFPage {
+  id          String       @id @default(uuid())
+  pdf         PDF          @relation(fields: [pdfId], references: [id], onDelete: Cascade)
+  pdfId       String
+  pageNumber  Int
+  text        String       @db.Text
+  textHash    String?      // For detecting changes
+  lineOffsets Json?        // Store line y-positions for better annotation positioning
+  contentBox  Json?        // {left, top, width, height} of main content area
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([pdfId, pageNumber])
+  @@index([pdfId, pageNumber])
+}

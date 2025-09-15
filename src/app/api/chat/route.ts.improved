@@ -1,0 +1,234 @@
+import { NextResponse } from 'next/server';
+import OpenAI from 'openai';
+import prisma from '@/lib/prisma';
+import { verifyAuth } from '@/lib/auth';
+
+interface Annotation {
+  type: 'highlight' | 'circle';
+  page: number;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  radius?: number;
+}
+
+interface TextItem {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export async function POST(request: Request) {
+  try {
+    // Verify authentication
+    const userId = await verifyAuth(request);
+    if (!userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { messages, pdfText, pdfId } = await request.json();
+
+    if (!pdfText || !pdfText.current) {
+      return NextResponse.json({ error: 'No PDF content provided' }, { status: 400 });
+    }
+
+    const { 
+      current: currentPageText, 
+      previous: previousPageText, 
+      next: nextPageText, 
+      currentPage, 
+      totalPages,
+      currentPageLayout // This should be an array of text items with position data
+    } = pdfText;
+
+    // Create text item examples if layout data exists
+    let textExamples = '';
+    let textMappings = '';
+    if (currentPageLayout && Array.isArray(currentPageLayout)) {
+      // Get some representative text items to show as examples
+      const sampleItems = currentPageLayout.slice(0, 5);
+      
+      textExamples = sampleItems.map(item => 
+        `"${item.text}" is at position [x:${item.x}, y:${item.y}, w:${item.width}, h:${item.height}]`
+      ).join('\n');
+      
+      // Create text-to-position mappings for common words
+      const commonWords = currentPageLayout
+        .filter(item => item.text.length > 4) // Only words of reasonable length
+        .slice(0, 20); // Limit to 20 words to avoid token overflow
+      
+      textMappings = commonWords.map(item => 
+        `"${item.text}": {x:${item.x}, y:${item.y}, width:${item.width}, height:${item.height}}`
+      ).join('\n');
+    }
+
+    // System message that explains the AI's capabilities including highlighting
+    const systemMessage = {
+      role: 'system',
+      content: `You are an AI study assistant analyzing a PDF document. Your primary role is to help users understand the content and navigate through the document.
+
+You are currently viewing Page ${currentPage} of ${totalPages}. Here's what you can see:
+
+Current Page Summary (${currentPage}/${totalPages}):
+${currentPageText.substring(0, 1000)}${currentPageText.length > 1000 ? '...' : ''}
+
+${previousPageText ? `Previous Page (${currentPage - 1}):
+${previousPageText.substring(0, 200)}${previousPageText.length > 200 ? '...' : ''}` : ''}
+
+${nextPageText ? `Next Page (${currentPage + 1}):
+${nextPageText.substring(0, 200)}${nextPageText.length > 200 ? '...' : ''}` : 'Note: You are on the last page.'}
+
+IMPORTANT INSTRUCTIONS:
+
+1. PAGE NAVIGATION - You MUST use these commands when users ask about content on different pages:
+   - Use [GO TO PAGE x] to jump to a specific page (e.g., "Let me check page 16 [GO TO PAGE 16]")
+   - Use [NEXT PAGE] to move forward one page
+   - Use [PREV PAGE] to move back one page
+   ALWAYS explain why you're navigating (e.g., "Let me look for that information on the next page [NEXT PAGE]")
+
+2. CONTENT ANALYSIS:
+   - Answer questions about the PDF content directly and precisely
+   - When information spans multiple pages, navigate through them sequentially
+   - Use the page context you have to determine if you need to navigate
+
+3. ANNOTATIONS - Use these to highlight relevant information:
+   ${textExamples ? `
+   - I'll provide position data for text on the current page. For example:
+   ${textExamples}
+   
+   - When highlighting text, try to use the actual coordinates of the text:
+   [HIGHLIGHT ${currentPage} x y width height]
+   
+   - When important words or phrases appear in the text, you can highlight them using these mappings:
+   ${textMappings}
+   ` : `
+   - Highlight text: [HIGHLIGHT page x y width height]
+   - Circle areas: [CIRCLE page x y radius]
+   `}
+   Always explain what you're highlighting/circling
+
+4. INTERACTION RULES:
+   - Only use text-to-speech when explicitly requested ("read this")
+   - Never read responses automatically
+   - Always acknowledge when you're looking at a different page
+
+Remember: You have direct access to the current page's content and can navigate to find more information. Use this capability actively when answering questions!
+
+Example: "Let me point out this key section [HIGHLIGHT ${currentPage} ${
+      textMappings ? '243 156 120 20' : '150 300 200 50'
+    }] on the current page which states..."
+`
+    };
+
+    const openai = new OpenAI({ 
+      apiKey: process.env.OPENAI_API_KEY
+    });
+    
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4-turbo', // Using GPT-4-turbo for better visual understanding if available
+      messages: [
+        systemMessage,
+        ...messages.map((m: {role: string, content: string}) => ({
+          role: m.role,
+          content: m.content,
+        }))
+      ],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+
+    const reply = response.choices[0].message?.content;
+
+    // Parse navigation commands from the reply
+    let pageNumber = currentPage;
+    const goToPageRegex = /\[GO TO PAGE (\d+)\]/;
+    const nextPageRegex = /\[NEXT PAGE\]/;
+    const prevPageRegex = /\[PREV PAGE\]/;
+
+    const goToPageMatch = reply?.match(goToPageRegex);
+    const hasNextPage = nextPageRegex.test(reply || '');
+    const hasPrevPage = prevPageRegex.test(reply || '');
+
+    if (goToPageMatch) {
+      const requestedPage = parseInt(goToPageMatch[1]);
+      if (requestedPage >= 1 && requestedPage <= totalPages) {
+        pageNumber = requestedPage;
+      }
+    } else if (hasNextPage && currentPage < totalPages) {
+      pageNumber = currentPage + 1;
+    } else if (hasPrevPage && currentPage > 1) {
+      pageNumber = currentPage - 1;
+    }
+
+    // Parse annotation commands from the reply
+    const annotations = [];
+    const highlightRegex = /\[HIGHLIGHT (\d+) (\d+) (\d+) (\d+) (\d+)\]/g;
+    const circleRegex = /\[CIRCLE (\d+) (\d+) (\d+) (\d+)\]/g;
+
+    let match;
+    while ((match = highlightRegex.exec(reply || '')) !== null) {
+      annotations.push({
+        type: 'highlight',
+        page: parseInt(match[1]),
+        x: parseInt(match[2]),
+        y: parseInt(match[3]),
+        width: parseInt(match[4]),
+        height: parseInt(match[5]),
+        color: 'rgba(255, 255, 0, 0.3)'
+      });
+    }
+
+    while ((match = circleRegex.exec(reply || '')) !== null) {
+      annotations.push({
+        type: 'circle',
+        page: parseInt(match[1]),
+        x: parseInt(match[2]),
+        y: parseInt(match[3]),
+        radius: parseInt(match[4]),
+        color: 'red'
+      });
+    }
+
+    // Store the chat message and annotations in the database
+    if (pdfId) {
+      await prisma.chat.create({
+        data: {
+          pdfId,
+          userId,
+          messages: {
+            messages: [...messages, { role: 'assistant', content: reply }],
+            annotations: annotations
+          },
+        },
+      });
+    }
+
+    // Clean up the response text by removing the command syntax
+    const cleanedReply = reply?.replace(/\[HIGHLIGHT \d+ \d+ \d+ \d+ \d+\]/g, '')
+                             .replace(/\[CIRCLE \d+ \d+ \d+ \d+\]/g, '')
+                             .replace(/\[GO TO PAGE \d+\]/g, '')
+                             .replace(/\[NEXT PAGE\]/g, '')
+                             .replace(/\[PREV PAGE\]/g, '')
+                             .trim();
+
+    return NextResponse.json({ 
+      reply: cleanedReply || reply,
+      rawReply: reply,
+      annotations,
+      pageNumber: pageNumber !== currentPage ? pageNumber : undefined 
+    });
+  } catch (error: any) {
+    console.error('Chat error:', error);
+    const errorMessage = error.message || 'Failed to process chat request';
+    return NextResponse.json(
+      { 
+        error: errorMessage,
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      },
+      { status: 500 }
+    );
+  }
+}

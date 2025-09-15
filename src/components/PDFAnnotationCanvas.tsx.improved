@@ -1,0 +1,199 @@
+import { useEffect, useRef, useState } from 'react';
+import { fabric } from 'fabric';
+
+interface Annotation {
+  type: 'highlight' | 'circle';
+  page: number;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  radius?: number;
+  color?: string;
+}
+
+interface PDFAnnotationCanvasProps {
+  pageWidth: number;
+  pageHeight: number;
+  annotations: Annotation[];
+  currentPage: number;
+  onAnnotationAdd?: (annotation: Annotation) => void;
+}
+
+export function PDFAnnotationCanvas({
+  pageWidth,
+  pageHeight,
+  annotations,
+  currentPage,
+  onAnnotationAdd
+}: PDFAnnotationCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  // Debug information
+  useEffect(() => {
+    console.log("PDFAnnotationCanvas - Dimensions:", {
+      pageWidth,
+      pageHeight,
+      scale,
+      annotationsCount: annotations.length
+    });
+  }, [pageWidth, pageHeight, scale, annotations.length]);
+
+  // Update canvas size based on container size
+  useEffect(() => {
+    if (!containerRef.current) return;
+    
+    const updateCanvasSize = () => {
+      if (!containerRef.current) return;
+      const container = containerRef.current;
+      const rect = container.getBoundingClientRect();
+      
+      // Calculate scale based on the container size and PDF page size
+      const scaleX = rect.width / pageWidth;
+      const scaleY = rect.height / pageHeight;
+      const newScale = Math.min(scaleX, scaleY);
+      setScale(newScale);
+
+      if (fabricCanvasRef.current) {
+        fabricCanvasRef.current.setDimensions({
+          width: pageWidth * newScale,
+          height: pageHeight * newScale
+        });
+        fabricCanvasRef.current.setZoom(newScale);
+        fabricCanvasRef.current.renderAll();
+      }
+    };
+
+    updateCanvasSize();
+    window.addEventListener('resize', updateCanvasSize);
+    return () => window.removeEventListener('resize', updateCanvasSize);
+  }, [pageWidth, pageHeight]);
+
+  // Initialize fabric canvas
+  useEffect(() => {
+    if (!canvasRef.current) return;
+
+    try {
+      // Clean up previous canvas if it exists
+      if (fabricCanvasRef.current) {
+        fabricCanvasRef.current.dispose();
+      }
+      
+      // Create new fabric canvas
+      const canvas = new fabric.Canvas(canvasRef.current, {
+        width: pageWidth * scale,
+        height: pageHeight * scale,
+        selection: false,
+        renderOnAddRemove: true,
+        backgroundColor: 'transparent'
+      });
+      
+      fabricCanvasRef.current = canvas;
+      
+      console.log("Canvas initialized with dimensions:", {
+        width: pageWidth * scale, 
+        height: pageHeight * scale,
+        scale
+      });
+    } catch (error) {
+      console.error('Error initializing fabric canvas:', error);
+    }
+
+    // Cleanup
+    return () => {
+      if (fabricCanvasRef.current) {
+        fabricCanvasRef.current.dispose();
+        fabricCanvasRef.current = null;
+      }
+    };
+  }, [pageWidth, pageHeight, scale]);
+
+  // Apply annotations when they change or the page changes
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    // Clear existing annotations
+    canvas.clear();
+
+    // Filter annotations for current page
+    const currentPageAnnotations = annotations.filter(a => a.page === currentPage);
+    console.log(`Rendering ${currentPageAnnotations.length} annotations for page ${currentPage}`);
+
+    // Draw new annotations with proper scaling
+    currentPageAnnotations.forEach((annotation, index) => {
+      try {
+        switch (annotation.type) {
+          case 'highlight': {
+            if (!annotation.width || !annotation.height) {
+              console.warn(`Skipping highlight annotation ${index} with missing dimensions`);
+              return;
+            }
+            
+            const rect = new fabric.Rect({
+              left: annotation.x * scale,
+              top: annotation.y * scale,
+              width: annotation.width * scale,
+              height: annotation.height * scale,
+              fill: annotation.color || 'rgba(255, 255, 0, 0.3)',
+              selectable: false,
+              evented: false,
+              opacity: 0.5,
+              strokeWidth: 0
+            });
+            canvas.add(rect);
+            console.log(`Added highlight at: x=${annotation.x}, y=${annotation.y}, w=${annotation.width}, h=${annotation.height}, scale=${scale}`);
+            break;
+          }
+          case 'circle': {
+            if (!annotation.radius) {
+              console.warn(`Skipping circle annotation ${index} with missing radius`);
+              return;
+            }
+            
+            const circle = new fabric.Circle({
+              left: annotation.x * scale,
+              top: annotation.y * scale,
+              radius: annotation.radius * scale,
+              stroke: annotation.color || 'red',
+              strokeWidth: 2 * scale,
+              fill: 'rgba(255, 0, 0, 0.1)',
+              selectable: false,
+              evented: false,
+              opacity: 0.7
+            });
+            canvas.add(circle);
+            console.log(`Added circle at: x=${annotation.x}, y=${annotation.y}, radius=${annotation.radius}, scale=${scale}`);
+            break;
+          }
+        }
+      } catch (error) {
+        console.error(`Error rendering annotation ${index}:`, error, annotation);
+      }
+    });
+
+    // Render with proper scaling
+    canvas.setZoom(scale);
+    canvas.renderAll();
+  }, [annotations, currentPage, scale]);
+
+  return (
+    <div 
+      ref={containerRef} 
+      className="absolute top-0 left-0 w-full h-full pointer-events-none z-10"
+      style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}
+    >
+      <canvas
+        ref={canvasRef}
+        style={{ 
+          pointerEvents: 'none',
+          position: 'absolute',
+          border: process.env.NODE_ENV === 'development' ? '1px dashed rgba(255,0,0,0.2)' : 'none'
+        }}
+      />
+    </div>
+  );
+}
